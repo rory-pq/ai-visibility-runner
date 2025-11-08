@@ -1,6 +1,7 @@
 import re, json, time
 import pandas as pd
 import streamlit as st
+import requests
 from pathlib import Path
 
 st.set_page_config(page_title="AI Visibility Runner", page_icon="🔎", layout="centered")
@@ -19,9 +20,91 @@ st.title("AI Search Visibility Runner")
 # Tabs: main runner + history
 tab_run, tab_history = st.tabs(["Run prompt", "Run history"])
 
-# -----------------------
-# TAB 1: RUN PROMPT
-# -----------------------
+# ---------- API CALL HELPERS ----------
+
+def call_chatgpt(prompt: str) -> str:
+    """Call OpenAI Chat Completions API. Returns text or error message."""
+    api_key = st.secrets.get("OPENAI_API_KEY")
+    if not api_key:
+        return "ChatGPT API not configured. Add OPENAI_API_KEY in Streamlit secrets."
+
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    data = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.2,
+        "max_tokens": 800,
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=data, timeout=40)
+        resp.raise_for_status()
+        out = resp.json()
+        return out["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"ChatGPT API error: {e}"
+
+def call_perplexity(prompt: str) -> str:
+    """Call Perplexity API. Returns text or error message."""
+    api_key = st.secrets.get("PERPLEXITY_API_KEY")
+    if not api_key:
+        return "Perplexity API not configured. Add PERPLEXITY_API_KEY in Streamlit secrets."
+
+    url = "https://api.perplexity.ai/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    data = {
+        "model": "llama-3.1-sonar-small-online",
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.2,
+        "max_tokens": 800,
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=data, timeout=40)
+        resp.raise_for_status()
+        out = resp.json()
+        return out["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"Perplexity API error: {e}"
+
+def call_gemini(prompt: str) -> str:
+    """Call Gemini API. Returns text or error message."""
+    api_key = st.secrets.get("GEMINI_API_KEY")
+    if not api_key:
+        return "Gemini API not configured. Add GEMINI_API_KEY in Streamlit secrets."
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/"
+        "models/gemini-1.5-flash:generateContent"
+        f"?key={api_key}"
+    )
+    data = {
+        "contents": [
+            {"parts": [{"text": prompt}]}
+        ]
+    }
+
+    try:
+        resp = requests.post(url, json=data, timeout=40)
+        resp.raise_for_status()
+        out = resp.json()
+        # Simple text join
+        parts = out.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        text = " ".join(p.get("text", "") for p in parts)
+        return text or "Gemini response was empty."
+    except Exception as e:
+        return f"Gemini API error: {e}"
+
+# ---------- TAB 1: RUN PROMPT ----------
+
 with tab_run:
     with st.sidebar:
         st.header("Run inputs")
@@ -52,6 +135,13 @@ with tab_run:
         # Map brand fields used in some templates
         inputs["brand_a"] = inputs["brand"]
         inputs["brand_b"] = inputs["competitor"]
+
+        st.markdown("---")
+        api_mode = st.checkbox(
+            "Run via APIs (ChatGPT, Perplexity, Gemini)",
+            value=False,
+            help="Off = manual copy/paste. On = call APIs with this prompt."
+        )
 
     st.subheader("1) Pick a template")
 
@@ -121,13 +211,20 @@ with tab_run:
         st.warning("No template selected.")
         st.stop()
 
-    st.subheader("3) Log the run (no APIs yet)")
-    st.caption(
-        "This only logs the prompt. "
-        "You still run the search on ChatGPT, Perplexity, Gemini, or Google by hand."
-    )
+    st.subheader("3) Run and log")
 
-    def log_run(platform, prompt, meta):
+    if api_mode:
+        st.caption(
+            "API mode is ON. The app calls ChatGPT, Perplexity, and Gemini "
+            "for each platform you select."
+        )
+    else:
+        st.caption(
+            "API mode is OFF. The app only logs the prompt. "
+            "You run searches in AI tools by hand."
+        )
+
+    def log_run(platform, prompt, meta, response_text: str):
         RUNS_PATH.touch(exist_ok=True)
         cols = [
             "timestamp",
@@ -142,6 +239,11 @@ with tab_run:
             "rank_notes",
             "raw_capture_path",
         ]
+        # Put a short snippet of the response in rank_notes
+        snippet = (response_text or "").strip().replace("\n", " ")
+        if len(snippet) > 300:
+            snippet = snippet[:297] + "..."
+
         row = {
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "platform": platform,
@@ -152,7 +254,7 @@ with tab_run:
             "inputs_json": json.dumps(inputs),
             "top_brands_json": json.dumps([]),
             "top_domains_json": json.dumps([]),
-            "rank_notes": "",
+            "rank_notes": snippet,
             "raw_capture_path": "",
         }
         try:
@@ -166,7 +268,7 @@ with tab_run:
             pd.DataFrame([row])[cols].to_csv(RUNS_PATH, index=False)
 
     platforms = st.multiselect(
-        "Pick platforms to log",
+        "Pick platforms to run/log",
         ["ChatGPT", "Perplexity", "Gemini", "AI Overviews"],
         default=["ChatGPT"],
     )
@@ -177,10 +279,39 @@ with tab_run:
         "intent_type": chosen.iloc[0]["intent_type"],
     }
 
-    if st.button("Save log rows"):
+    if st.button("Run now"):
+        results = {}
+        # Call APIs only for non-Google tools
         for p in platforms:
-            log_run(p, filled, meta)
-        st.success("Saved to runs.csv. Download below.")
+            response_text = ""
+            if api_mode and p != "AI Overviews":
+                if p == "ChatGPT":
+                    response_text = call_chatgpt(filled)
+                elif p == "Perplexity":
+                    response_text = call_perplexity(filled)
+                elif p == "Gemini":
+                    response_text = call_gemini(filled)
+            else:
+                # Manual mode or AI Overviews
+                response_text = ""
+
+            log_run(p, filled, meta, response_text)
+            results[p] = response_text
+
+        st.success("Runs logged. See quick previews below and in the Run history tab.")
+
+        # Show previews for API calls
+        for p, text in results.items():
+            if not text:
+                continue
+            st.markdown(f"**{p} response preview**")
+            st.text_area(
+                f"{p} response",
+                value=text,
+                height=200,
+            )
+
+        # Download button for runs
         try:
             with open(RUNS_PATH, "rb") as f:
                 st.download_button(
@@ -192,9 +323,8 @@ with tab_run:
         except FileNotFoundError:
             st.info("No runs file yet. Run at least one log first.")
 
-# -----------------------
-# TAB 2: RUN HISTORY
-# -----------------------
+# ---------- TAB 2: RUN HISTORY ----------
+
 with tab_history:
     st.subheader("Previous runs")
 
@@ -223,17 +353,20 @@ with tab_history:
         if "timestamp" in filtered.columns:
             filtered = filtered.sort_values("timestamp", ascending=False)
 
-        st.caption("Showing recent runs. Use filters to narrow the view.")
+        st.caption("Showing recent runs. Response snippet comes from the model output or notes.")
+        display_df = filtered[
+            [
+                "timestamp",
+                "platform",
+                "template_id",
+                "intent_type",
+                "filled_prompt",
+                "rank_notes",
+            ]
+        ].rename(columns={"rank_notes": "response_snippet"})
+
         st.dataframe(
-            filtered[
-                [
-                    "timestamp",
-                    "platform",
-                    "template_id",
-                    "intent_type",
-                    "filled_prompt",
-                ]
-            ],
+            display_df,
             hide_index=True,
             use_container_width=True,
         )
