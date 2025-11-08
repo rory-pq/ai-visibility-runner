@@ -2,20 +2,39 @@ import re, json, time
 import pandas as pd
 import streamlit as st
 import requests
+from urllib.parse import urlparse
 from pathlib import Path
 
 st.set_page_config(page_title="AI Visibility Runner", page_icon="🔎", layout="centered")
 
 TEMPLATE_PATH = Path("templates_runtime.csv")
 RUNS_PATH = Path("runs.csv")
+BRANDS_PATH = Path("brands.csv")
 
 # Load templates
 df = pd.read_csv(TEMPLATE_PATH)
 
+# Load optional brands config
+BRANDS_CONFIG = []
+if BRANDS_PATH.exists():
+    try:
+        bdf = pd.read_csv(BRANDS_PATH)
+        for _, row in bdf.iterrows():
+            name = str(row.get("brand", "")).strip()
+            alias_str = str(row.get("alias", "")).strip()
+            if not name:
+                continue
+            aliases = []
+            if alias_str:
+                aliases = [a.strip() for a in alias_str.split("|") if a.strip()]
+            BRANDS_CONFIG.append({"brand": name, "aliases": aliases})
+    except Exception:
+        BRANDS_CONFIG = []
+
 # Auto-generate a run id (hidden from UI)
 run_id = str(int(time.time()))
 
-st.title("AI Search Visibility Runner")
+st.title("AI Visibility Runner")
 
 # Tabs: main runner + history
 tab_run, tab_history = st.tabs(["Run prompt", "Run history"])
@@ -32,9 +51,7 @@ def call_chatgpt(prompt: str) -> str:
     headers = {"Authorization": f"Bearer {api_key}"}
     data = {
         "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
+        "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
         "max_tokens": 800,
     }
@@ -60,9 +77,7 @@ def call_perplexity(prompt: str) -> str:
     }
     data = {
         "model": "llama-3.1-sonar-small-online",
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
+        "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
         "max_tokens": 800,
     }
@@ -86,22 +101,73 @@ def call_gemini(prompt: str) -> str:
         "models/gemini-1.5-flash:generateContent"
         f"?key={api_key}"
     )
-    data = {
-        "contents": [
-            {"parts": [{"text": prompt}]}
-        ]
-    }
+    data = {"contents": [{"parts": [{"text": prompt}]}]}
 
     try:
         resp = requests.post(url, json=data, timeout=40)
         resp.raise_for_status()
         out = resp.json()
-        # Simple text join
         parts = out.get("candidates", [{}])[0].get("content", {}).get("parts", [])
         text = " ".join(p.get("text", "") for p in parts)
         return text or "Gemini response was empty."
     except Exception as e:
         return f"Gemini API error: {e}"
+
+# ---------- BRAND + DOMAIN HELPERS ----------
+
+def detect_brands_in_text(text: str, inputs: dict) -> list:
+    """Return list of {brand, hits} for brands found in the text."""
+    if not text:
+        return []
+
+    lower_text = text.lower()
+
+    # Start with config brands
+    brands = list(BRANDS_CONFIG)
+
+    # Add dynamic 'brand' and 'competitor' if not already present
+    for key in ("brand", "competitor"):
+        val = (inputs.get(key) or "").strip()
+        if val:
+            if not any(b["brand"].lower() == val.lower() for b in brands):
+                brands.append({"brand": val, "aliases": []})
+
+    hits = []
+    for b in brands:
+        name = b["brand"]
+        aliases = b.get("aliases", [])
+        patterns = [name] + aliases
+        total = 0
+        for pat in patterns:
+            pat = pat.strip()
+            if not pat:
+                continue
+            # Case-insensitive word match
+            total += len(
+                re.findall(r"\b" + re.escape(pat.lower()) + r"\b", lower_text)
+            )
+        if total > 0:
+            hits.append({"brand": name, "hits": int(total)})
+
+    return hits
+
+def extract_domains_from_text(text: str) -> list:
+    """Return list of {domain, hits} from URLs in the text."""
+    if not text:
+        return []
+    urls = re.findall(r"https?://[^\s)>\]\"'}]+", text)
+    counts = {}
+    for u in urls:
+        try:
+            netloc = urlparse(u).netloc.lower()
+        except Exception:
+            continue
+        if not netloc:
+            continue
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        counts[netloc] = counts.get(netloc, 0) + 1
+    return [{"domain": d, "hits": c} for d, c in counts.items()]
 
 # ---------- TAB 1: RUN PROMPT ----------
 
@@ -160,7 +226,6 @@ with tab_run:
 
     if cands.empty:
         st.info("No perfect matches yet. Fill more inputs or clear the intent filter.")
-        # Show a small sample to help the user see options
         cands = pool.head(5).copy()
         cands["score"] = 0
     else:
@@ -181,7 +246,6 @@ with tab_run:
 
     st.caption("Pick a template ID from the table. Higher rows match more of your inputs.")
 
-    # Friendlier template picker: dropdown from candidates
     template_ids = cands["template_id"].tolist()
     chosen_id = st.selectbox("Template ID to use", template_ids)
 
@@ -193,9 +257,7 @@ with tab_run:
         text = tpl
         for k, v in vals.items():
             text = text.replace("{" + k + "}", v or "")
-        # Clean extra spaces
         text = re.sub(r"\s{2,}", " ", text).strip()
-        # Drop hanging prepositions before punctuation/end
         text = re.sub(r"\s+(in|for|with)\s+(?=[?.!]|$)", "", text)
         text = re.sub(r"\s{2,}", " ", text).strip()
         return text
@@ -239,7 +301,12 @@ with tab_run:
             "rank_notes",
             "raw_capture_path",
         ]
-        # Put a short snippet of the response in rank_notes
+
+        # Detection
+        brand_hits = detect_brands_in_text(response_text, inputs)
+        domain_hits = extract_domains_from_text(response_text) if platform == "Perplexity" else extract_domains_from_text(response_text)
+
+        # Short snippet
         snippet = (response_text or "").strip().replace("\n", " ")
         if len(snippet) > 300:
             snippet = snippet[:297] + "..."
@@ -252,8 +319,8 @@ with tab_run:
             "intent_type": meta["intent_type"],
             "filled_prompt": prompt,
             "inputs_json": json.dumps(inputs),
-            "top_brands_json": json.dumps([]),
-            "top_domains_json": json.dumps([]),
+            "top_brands_json": json.dumps(brand_hits),
+            "top_domains_json": json.dumps(domain_hits),
             "rank_notes": snippet,
             "raw_capture_path": "",
         }
@@ -281,7 +348,6 @@ with tab_run:
 
     if st.button("Run now"):
         results = {}
-        # Call APIs only for non-Google tools
         for p in platforms:
             response_text = ""
             if api_mode and p != "AI Overviews":
@@ -292,15 +358,13 @@ with tab_run:
                 elif p == "Gemini":
                     response_text = call_gemini(filled)
             else:
-                # Manual mode or AI Overviews
                 response_text = ""
 
             log_run(p, filled, meta, response_text)
             results[p] = response_text
 
-        st.success("Runs logged. See quick previews below and in the Run history tab.")
+        st.success("Runs logged. See previews below and in the Run history tab.")
 
-        # Show previews for API calls
         for p, text in results.items():
             if not text:
                 continue
@@ -311,7 +375,6 @@ with tab_run:
                 height=200,
             )
 
-        # Download button for runs
         try:
             with open(RUNS_PATH, "rb") as f:
                 st.download_button(
@@ -333,7 +396,6 @@ with tab_history:
     else:
         runs_df = pd.read_csv(RUNS_PATH)
 
-        # Basic filters
         platforms = ["All"] + sorted(runs_df["platform"].dropna().unique().tolist())
         intents = ["All"] + sorted(runs_df["intent_type"].dropna().unique().tolist())
 
@@ -349,11 +411,10 @@ with tab_history:
         if intent_filter != "All":
             filtered = filtered[filtered["intent_type"] == intent_filter]
 
-        # Show newest first
         if "timestamp" in filtered.columns:
             filtered = filtered.sort_values("timestamp", ascending=False)
 
-        st.caption("Showing recent runs. Response snippet comes from the model output or notes.")
+        st.caption("Run log with response snippet.")
         display_df = filtered[
             [
                 "timestamp",
@@ -370,6 +431,70 @@ with tab_history:
             hide_index=True,
             use_container_width=True,
         )
+
+        # -------- BRAND SUMMARY --------
+        st.markdown("### Brand counts by platform")
+        brand_rows = []
+        for _, row in runs_df.iterrows():
+            platform = row.get("platform", "")
+            try:
+                brands_json = json.loads(row.get("top_brands_json", "[]") or "[]")
+            except Exception:
+                brands_json = []
+            for item in brands_json:
+                brand_name = item.get("brand")
+                hits = item.get("hits", 0)
+                if brand_name and hits:
+                    brand_rows.append(
+                        {"brand": brand_name, "platform": platform, "hits": int(hits)}
+                    )
+
+        if brand_rows:
+            brand_df = pd.DataFrame(brand_rows)
+            brand_summary = (
+                brand_df.groupby(["brand", "platform"], as_index=False)["hits"].sum()
+            )
+            st.dataframe(
+                brand_summary.sort_values(["hits"], ascending=False).reset_index(
+                    drop=True
+                ),
+                hide_index=True,
+                use_container_width=True,
+            )
+        else:
+            st.info("No brand hits detected yet. Add brands.csv or brand inputs, then re-run tests.")
+
+        # -------- DOMAIN SUMMARY --------
+        st.markdown("### Domain counts by platform")
+        domain_rows = []
+        for _, row in runs_df.iterrows():
+            platform = row.get("platform", "")
+            try:
+                dom_json = json.loads(row.get("top_domains_json", "[]") or "[]")
+            except Exception:
+                dom_json = []
+            for item in dom_json:
+                dom = item.get("domain")
+                hits = item.get("hits", 0)
+                if dom and hits:
+                    domain_rows.append(
+                        {"domain": dom, "platform": platform, "hits": int(hits)}
+                    )
+
+        if domain_rows:
+            dom_df = pd.DataFrame(domain_rows)
+            dom_summary = (
+                dom_df.groupby(["domain", "platform"], as_index=False)["hits"].sum()
+            )
+            st.dataframe(
+                dom_summary.sort_values(["hits"], ascending=False).reset_index(
+                    drop=True
+                ),
+                hide_index=True,
+                use_container_width=True,
+            )
+        else:
+            st.info("No domains detected yet. Perplexity and other tools must return URLs first.")
 
         st.caption("Need full data? Download the CSV below.")
         with open(RUNS_PATH, "rb") as f:
