@@ -1,4 +1,3 @@
-
 import re, json, time
 import pandas as pd
 import streamlit as st
@@ -12,17 +11,27 @@ RUNS_PATH = Path("runs.csv")
 # Load templates
 df = pd.read_csv(TEMPLATE_PATH)
 
+# Auto-generate a run id (hidden from UI)
+run_id = str(int(time.time()))
+
 st.title("AI Search Visibility Runner")
 
 with st.sidebar:
     st.header("Run inputs")
-    run_id = st.text_input("Run ID", value=str(int(time.time())))
-    intent_pick = st.selectbox("Intent (optional)", ["(any)"] + sorted(df["intent_type"].unique().tolist()))
+    st.caption(
+        "Fill only the fields that match this test. "
+        "The tool picks templates that use your inputs."
+    )
+
+    intent_pick = st.selectbox(
+        "Intent (optional filter)",
+        ["(any)"] + sorted(df["intent_type"].unique().tolist())
+    )
+
+    # Core inputs
     inputs = {
         "brand": st.text_input("Your brand"),
-        "competitor": st.text_input("Competitor"),
-        "brand_a": st.text_input("Brand A"),
-        "brand_b": st.text_input("Brand B"),
+        "competitor": st.text_input("Main competitor (optional)"),
         "industry": st.text_input("Industry"),
         "product_or_service": st.text_input("Product or Service"),
         "target_audience": st.text_input("Target audience"),
@@ -32,6 +41,10 @@ with st.sidebar:
         "budget": st.text_input("Budget"),
         "timeframe": st.text_input("Timeframe"),
     }
+
+    # Map brand fields used in some templates
+    inputs["brand_a"] = inputs["brand"]
+    inputs["brand_b"] = inputs["competitor"]
 
 st.subheader("1) Pick a template")
 
@@ -45,26 +58,47 @@ def score_optional(row, vals):
     opt = set(str(row["variables_optional"]).split("|")) if pd.notna(row["variables_optional"]) else set()
     return sum(1 for k in opt if vals.get(k))
 
+# Find candidates that have all required variables
 cands = pool[pool.apply(lambda r: has_required(r, inputs), axis=1)].copy()
+
 if cands.empty:
-    st.info("Fill inputs for required fields. Or clear the intent filter.")
+    st.info("No perfect matches yet. Fill more inputs or clear the intent filter.")
+    # Show a small sample to help the user see options
     cands = pool.head(5).copy()
     cands["score"] = 0
 else:
     cands["score"] = cands.apply(lambda r: score_optional(r, inputs), axis=1)
+
+if cands.empty:
+    st.warning("No templates found. Add more templates or adjust filters.")
+    st.stop()
+
 cands = cands.sort_values(["score"], ascending=False)
 
-st.dataframe(cands[["template_id","intent_type","prompt_template","variables_required","variables_optional","score"]].reset_index(drop=True))
+# Show only user-friendly columns
+st.dataframe(
+    cands[["template_id", "intent_type", "prompt_template", "notes"]].reset_index(drop=True),
+    hide_index=True,
+    use_container_width=True,
+)
 
-chosen_id = st.text_input("Template ID", value=cands.iloc[0]["template_id"] if not cands.empty else "")
+st.caption("Pick a template ID from the table. Higher rows match more of your inputs.")
+
+# Friendlier template picker: dropdown from candidates
+template_ids = cands["template_id"].tolist()
+chosen_id = st.selectbox("Template ID to use", template_ids)
+
 chosen = df[df["template_id"] == chosen_id].head(1)
 
 st.subheader("2) Fill prompt")
+
 def fill_template(tpl: str, vals: dict) -> str:
     text = tpl
     for k, v in vals.items():
-        text = text.replace("{"+k+"}", v or "")
+        text = text.replace("{" + k + "}", v or "")
+    # Clean extra spaces
     text = re.sub(r"\s{2,}", " ", text).strip()
+    # Drop hanging prepositions before punctuation/end
     text = re.sub(r"\s+(in|for|with)\s+(?=[?.!]|$)", "", text)
     text = re.sub(r"\s{2,}", " ", text).strip()
     return text
@@ -72,16 +106,35 @@ def fill_template(tpl: str, vals: dict) -> str:
 if not chosen.empty:
     template = chosen.iloc[0]["prompt_template"]
     filled = fill_template(template, inputs)
+    st.markdown("**Template**")
     st.code(template, language="text")
     st.markdown("**Filled prompt**")
-    st.text_area("Prompt", value=filled, height=120)
+    st.text_area("Prompt", value=filled, height=140)
 else:
+    st.warning("No template selected.")
     st.stop()
 
 st.subheader("3) Log the run (no APIs yet)")
+st.caption(
+    "This only logs the prompt. "
+    "You still run the search on ChatGPT, Perplexity, Gemini, or Google by hand."
+)
+
 def log_run(platform, prompt, meta):
     RUNS_PATH.touch(exist_ok=True)
-    cols = ["timestamp","platform","run_id","template_id","intent_type","filled_prompt","inputs_json","top_brands_json","top_domains_json","rank_notes","raw_capture_path"]
+    cols = [
+        "timestamp",
+        "platform",
+        "run_id",
+        "template_id",
+        "intent_type",
+        "filled_prompt",
+        "inputs_json",
+        "top_brands_json",
+        "top_domains_json",
+        "rank_notes",
+        "raw_capture_path",
+    ]
     row = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "platform": platform,
@@ -93,20 +146,41 @@ def log_run(platform, prompt, meta):
         "top_brands_json": json.dumps([]),
         "top_domains_json": json.dumps([]),
         "rank_notes": "",
-        "raw_capture_path": ""
+        "raw_capture_path": "",
     }
     try:
         if RUNS_PATH.stat().st_size == 0:
             pd.DataFrame([row])[cols].to_csv(RUNS_PATH, index=False)
         else:
-            pd.DataFrame([row])[cols].to_csv(RUNS_PATH, index=False, mode="a", header=False)
+            pd.DataFrame([row])[cols].to_csv(
+                RUNS_PATH, index=False, mode="a", header=False
+            )
     except FileNotFoundError:
         pd.DataFrame([row])[cols].to_csv(RUNS_PATH, index=False)
 
-platforms = st.multiselect("Pick platforms to log", ["ChatGPT","Perplexity","Gemini","AI Overviews"], default=["ChatGPT"])
-meta = {"run_id": run_id, "template_id": chosen.iloc[0]["template_id"], "intent_type": chosen.iloc[0]["intent_type"]}
+platforms = st.multiselect(
+    "Pick platforms to log",
+    ["ChatGPT", "Perplexity", "Gemini", "AI Overviews"],
+    default=["ChatGPT"],
+)
+
+meta = {
+    "run_id": run_id,
+    "template_id": chosen.iloc[0]["template_id"],
+    "intent_type": chosen.iloc[0]["intent_type"],
+}
+
 if st.button("Save log rows"):
     for p in platforms:
         log_run(p, filled, meta)
     st.success("Saved to runs.csv. Download below.")
-    st.download_button("Download runs.csv", data=open(RUNS_PATH, "rb").read(), file_name="runs.csv")
+    try:
+        with open(RUNS_PATH, "rb") as f:
+            st.download_button(
+                "Download runs.csv",
+                data=f.read(),
+                file_name="runs.csv",
+                mime="text/csv",
+            )
+    except FileNotFoundError:
+        st.info("No runs file yet. Run at least one log first.")
