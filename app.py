@@ -9,27 +9,9 @@ st.set_page_config(page_title="AI Visibility Runner", page_icon="🔎", layout="
 
 TEMPLATE_PATH = Path("templates_runtime.csv")
 RUNS_PATH = Path("runs.csv")
-BRANDS_PATH = Path("brands.csv")
 
 # Load templates
 df = pd.read_csv(TEMPLATE_PATH)
-
-# Load optional brands config
-BRANDS_CONFIG = []
-if BRANDS_PATH.exists():
-    try:
-        bdf = pd.read_csv(BRANDS_PATH)
-        for _, row in bdf.iterrows():
-            name = str(row.get("brand", "")).strip()
-            alias_str = str(row.get("alias", "")).strip()
-            if not name:
-                continue
-            aliases = []
-            if alias_str:
-                aliases = [a.strip() for a in alias_str.split("|") if a.strip()]
-            BRANDS_CONFIG.append({"brand": name, "aliases": aliases})
-    except Exception:
-        BRANDS_CONFIG = []
 
 # Auto-generate a run id (hidden from UI)
 run_id = str(int(time.time()))
@@ -113,24 +95,25 @@ def call_gemini(prompt: str) -> str:
     except Exception as e:
         return f"Gemini API error: {e}"
 
-# ---------- BRAND + DOMAIN HELPERS ----------
+# ---------- BRAND + DOMAIN HELPERS (DYNAMIC ONLY) ----------
 
 def detect_brands_in_text(text: str, inputs: dict) -> list:
-    """Return list of {brand, hits} for brands found in the text."""
+    """Return list of {brand, hits} using only Your brand and Main competitor."""
     if not text:
         return []
-
     lower_text = text.lower()
 
-    # Start with config brands
-    brands = list(BRANDS_CONFIG)
-
-    # Add dynamic 'brand' and 'competitor' if not already present
-    for key in ("brand", "competitor"):
-        val = (inputs.get(key) or "").strip()
-        if val:
-            if not any(b["brand"].lower() == val.lower() for b in brands):
-                brands.append({"brand": val, "aliases": []})
+    brands = []
+    # Your brand
+    my_brand = (inputs.get("brand") or "").strip()
+    if my_brand:
+        brands.append({"brand": my_brand, "aliases": []})
+    # Competitor
+    comp = (inputs.get("competitor") or "").strip()
+    if comp:
+        # avoid duplicate if same as brand
+        if not any(b["brand"].lower() == comp.lower() for b in brands):
+            brands.append({"brand": comp, "aliases": []})
 
     hits = []
     for b in brands:
@@ -142,7 +125,6 @@ def detect_brands_in_text(text: str, inputs: dict) -> list:
             pat = pat.strip()
             if not pat:
                 continue
-            # Case-insensitive word match
             total += len(
                 re.findall(r"\b" + re.escape(pat.lower()) + r"\b", lower_text)
             )
@@ -302,11 +284,9 @@ with tab_run:
             "raw_capture_path",
         ]
 
-        # Detection
         brand_hits = detect_brands_in_text(response_text, inputs)
-        domain_hits = extract_domains_from_text(response_text) if platform == "Perplexity" else extract_domains_from_text(response_text)
+        domain_hits = extract_domains_from_text(response_text)
 
-        # Short snippet
         snippet = (response_text or "").strip().replace("\n", " ")
         if len(snippet) > 300:
             snippet = snippet[:297] + "..."
@@ -396,14 +376,14 @@ with tab_history:
     else:
         runs_df = pd.read_csv(RUNS_PATH)
 
-        platforms = ["All"] + sorted(runs_df["platform"].dropna().unique().tolist())
-        intents = ["All"] + sorted(runs_df["intent_type"].dropna().unique().tolist())
+        platforms_all = ["All"] + sorted(runs_df["platform"].dropna().unique().tolist())
+        intents_all = ["All"] + sorted(runs_df["intent_type"].dropna().unique().tolist())
 
         col1, col2 = st.columns(2)
         with col1:
-            platform_filter = st.selectbox("Filter by platform", platforms)
+            platform_filter = st.selectbox("Filter by platform", platforms_all)
         with col2:
-            intent_filter = st.selectbox("Filter by intent", intents)
+            intent_filter = st.selectbox("Filter by intent", intents_all)
 
         filtered = runs_df.copy()
         if platform_filter != "All":
@@ -434,9 +414,11 @@ with tab_history:
 
         # -------- BRAND SUMMARY --------
         st.markdown("### Brand counts by platform")
+
         brand_rows = []
         for _, row in runs_df.iterrows():
             platform = row.get("platform", "")
+            intent = row.get("intent_type", "")
             try:
                 brands_json = json.loads(row.get("top_brands_json", "[]") or "[]")
             except Exception:
@@ -446,14 +428,65 @@ with tab_history:
                 hits = item.get("hits", 0)
                 if brand_name and hits:
                     brand_rows.append(
-                        {"brand": brand_name, "platform": platform, "hits": int(hits)}
+                        {
+                            "brand": brand_name,
+                            "platform": platform,
+                            "intent_type": intent,
+                            "hits": int(hits),
+                        }
                     )
 
         if brand_rows:
             brand_df = pd.DataFrame(brand_rows)
-            brand_summary = (
-                brand_df.groupby(["brand", "platform"], as_index=False)["hits"].sum()
+
+            # Focus toggle based on the most recent run's brand + competitor
+            latest_inputs = {}
+            try:
+                latest_row = runs_df.sort_values("timestamp").iloc[-1]
+                latest_inputs = json.loads(latest_row.get("inputs_json", "{}") or "{}")
+            except Exception:
+                latest_inputs = {}
+
+            focus_my_brand = (latest_inputs.get("brand") or "").strip()
+            focus_comp = (latest_inputs.get("competitor") or "").strip()
+
+            focus_toggle = st.checkbox(
+                "Show only your brand and main competitor "
+                "(from the most recent run)",
+                value=False,
+                help=(
+                    f"Current focus: '{focus_my_brand or 'n/a'}' "
+                    f"vs '{focus_comp or 'n/a'}'."
+                ),
             )
+
+            intent_chart_options = ["All"] + sorted(
+                brand_df["intent_type"].dropna().unique().tolist()
+            )
+            intent_chart_filter = st.selectbox(
+                "Chart intent filter", intent_chart_options, index=0
+            )
+
+            brand_chart_df = brand_df.copy()
+            if intent_chart_filter != "All":
+                brand_chart_df = brand_chart_df[
+                    brand_chart_df["intent_type"] == intent_chart_filter
+                ]
+
+            if focus_toggle and (focus_my_brand or focus_comp):
+                keep = set()
+                if focus_my_brand:
+                    keep.add(focus_my_brand)
+                if focus_comp:
+                    keep.add(focus_comp)
+                brand_chart_df = brand_chart_df[
+                    brand_chart_df["brand"].isin(list(keep))
+                ]
+
+            brand_summary = (
+                brand_chart_df.groupby(["brand", "platform"], as_index=False)["hits"].sum()
+            )
+
             st.dataframe(
                 brand_summary.sort_values(["hits"], ascending=False).reset_index(
                     drop=True
@@ -461,8 +494,22 @@ with tab_history:
                 hide_index=True,
                 use_container_width=True,
             )
+
+            # Simple chart: platform as index, brands as columns
+            if not brand_chart_df.empty:
+                chart_pivot = (
+                    brand_chart_df.groupby(["platform", "brand"], as_index=False)["hits"]
+                    .sum()
+                    .pivot(index="platform", columns="brand", values="hits")
+                    .fillna(0)
+                )
+                st.markdown("**Brand share by platform (hits)**")
+                st.bar_chart(chart_pivot)
         else:
-            st.info("No brand hits detected yet. Add brands.csv or brand inputs, then re-run tests.")
+            st.info(
+                "No brand hits detected yet. "
+                "Make sure you set 'Your brand' and optionally 'Main competitor' then run tests."
+            )
 
         # -------- DOMAIN SUMMARY --------
         st.markdown("### Domain counts by platform")
@@ -494,7 +541,9 @@ with tab_history:
                 use_container_width=True,
             )
         else:
-            st.info("No domains detected yet. Perplexity and other tools must return URLs first.")
+            st.info(
+                "No domains detected yet. Perplexity and other tools must return URLs first."
+            )
 
         st.caption("Need full data? Download the CSV below.")
         with open(RUNS_PATH, "rb") as f:
