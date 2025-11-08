@@ -24,7 +24,6 @@ tab_run, tab_history = st.tabs(["Run prompt", "Run history"])
 # ---------- API CALL HELPERS ----------
 
 def call_chatgpt(prompt: str) -> str:
-    """Call OpenAI Chat Completions API. Returns text or error message."""
     api_key = st.secrets.get("OPENAI_API_KEY")
     if not api_key:
         return "ChatGPT API not configured. Add OPENAI_API_KEY in Streamlit secrets."
@@ -47,7 +46,6 @@ def call_chatgpt(prompt: str) -> str:
         return f"ChatGPT API error: {e}"
 
 def call_perplexity(prompt: str) -> str:
-    """Call Perplexity API. Returns text or error message."""
     api_key = st.secrets.get("PERPLEXITY_API_KEY")
     if not api_key:
         return "Perplexity API not configured. Add PERPLEXITY_API_KEY in Streamlit secrets."
@@ -73,7 +71,6 @@ def call_perplexity(prompt: str) -> str:
         return f"Perplexity API error: {e}"
 
 def call_gemini(prompt: str) -> str:
-    """Call Gemini API. Returns text or error message."""
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key:
         return "Gemini API not configured. Add GEMINI_API_KEY in Streamlit secrets."
@@ -98,22 +95,19 @@ def call_gemini(prompt: str) -> str:
 # ---------- BRAND + DOMAIN HELPERS (DYNAMIC ONLY) ----------
 
 def detect_brands_in_text(text: str, inputs: dict) -> list:
-    """Return list of {brand, hits} using only Your brand and Main competitor."""
+    """Use only Your brand and Main competitor for brand hits."""
     if not text:
         return []
     lower_text = text.lower()
 
     brands = []
-    # Your brand
     my_brand = (inputs.get("brand") or "").strip()
     if my_brand:
         brands.append({"brand": my_brand, "aliases": []})
-    # Competitor
+
     comp = (inputs.get("competitor") or "").strip()
-    if comp:
-        # avoid duplicate if same as brand
-        if not any(b["brand"].lower() == comp.lower() for b in brands):
-            brands.append({"brand": comp, "aliases": []})
+    if comp and not any(b["brand"].lower() == comp.lower() for b in brands):
+        brands.append({"brand": comp, "aliases": []})
 
     hits = []
     for b in brands:
@@ -134,7 +128,7 @@ def detect_brands_in_text(text: str, inputs: dict) -> list:
     return hits
 
 def extract_domains_from_text(text: str) -> list:
-    """Return list of {domain, hits} from URLs in the text."""
+    """Find domains from URLs in the response text."""
     if not text:
         return []
     urls = re.findall(r"https?://[^\s)>\]\"'}]+", text)
@@ -157,27 +151,57 @@ with tab_run:
     with st.sidebar:
         st.header("Run inputs")
         st.caption(
-            "Fill only fields that match this test. "
-            "The tool picks templates that use your inputs."
+            "Fill fields that match this test. "
+            "Skip fields that do not matter."
         )
 
         intent_pick = st.selectbox(
-            "Intent (optional filter)",
+            "Intent filter (optional)",
             ["(any)"] + sorted(df["intent_type"].unique().tolist())
         )
 
-        # Core inputs
+        # Core inputs with clearer labels and help
         inputs = {
-            "brand": st.text_input("Your brand"),
-            "competitor": st.text_input("Main competitor (optional)"),
-            "industry": st.text_input("Industry"),
-            "product_or_service": st.text_input("Product or Service"),
-            "target_audience": st.text_input("Target audience"),
-            "unique_feature": st.text_input("Unique feature"),
-            "location": st.text_input("Location"),
-            "pain_point": st.text_input("Pain point"),
-            "budget": st.text_input("Budget"),
-            "timeframe": st.text_input("Timeframe"),
+            "brand": st.text_input(
+                "Your brand",
+                help="Client brand or your agency name."
+            ),
+            "competitor": st.text_input(
+                "Main competitor",
+                help="Key rival for this run. Leave blank if not needed."
+            ),
+            "industry": st.text_input(
+                "Industry or category",
+                help="Example: B2B SaaS, pet food, real estate, travel."
+            ),
+            "product_or_service": st.text_input(
+                "Product or service",
+                help="Example: SEO agency, CRM software, flexible packaging."
+            ),
+            "target_audience": st.text_input(
+                "Audience (who or what this is for)",
+                help="Use people or things. Example: marketers, food, B2B buyers, pets."
+            ),
+            "unique_feature": st.text_input(
+                "Key feature or angle",
+                help="Short phrase. Example: AI reporting, eco materials, same-day shipping."
+            ),
+            "location": st.text_input(
+                "Location",
+                help="City, region, or country. Example: New York, US, Europe."
+            ),
+            "pain_point": st.text_input(
+                "Main problem or use case",
+                help="Example: reduce ad spend, keep food fresh, cut churn."
+            ),
+            "budget": st.text_input(
+                "Budget limit",
+                help="Add only if used. Example: under $500/month, under $5K."
+            ),
+            "timeframe": st.text_input(
+                "Timeframe",
+                help="Add only if used. Example: this quarter, 2025, 30 days."
+            ),
         }
 
         # Map brand fields used in some templates
@@ -188,7 +212,7 @@ with tab_run:
         api_mode = st.checkbox(
             "Run via APIs (ChatGPT, Perplexity, Gemini)",
             value=False,
-            help="Off = manual copy/paste. On = call APIs with this prompt."
+            help="Off: copy prompts by hand. On: call model APIs from this app."
         )
 
     st.subheader("1) Pick a template")
@@ -207,7 +231,7 @@ with tab_run:
     cands = pool[pool.apply(lambda r: has_required(r, inputs), axis=1)].copy()
 
     if cands.empty:
-        st.info("No perfect matches yet. Fill more inputs or clear the intent filter.")
+        st.info("No perfect matches yet. Add more inputs or clear the intent filter.")
         cands = pool.head(5).copy()
         cands["score"] = 0
     else:
@@ -219,7 +243,6 @@ with tab_run:
 
     cands = cands.sort_values(["score"], ascending=False)
 
-    # Show only user-friendly columns
     st.dataframe(
         cands[["template_id", "intent_type", "prompt_template", "notes"]].reset_index(drop=True),
         hide_index=True,
@@ -495,7 +518,6 @@ with tab_history:
                 use_container_width=True,
             )
 
-            # Simple chart: platform as index, brands as columns
             if not brand_chart_df.empty:
                 chart_pivot = (
                     brand_chart_df.groupby(["platform", "brand"], as_index=False)["hits"]
@@ -508,7 +530,7 @@ with tab_history:
         else:
             st.info(
                 "No brand hits detected yet. "
-                "Make sure you set 'Your brand' and optionally 'Main competitor' then run tests."
+                "Set 'Your brand' and 'Main competitor' in runs, then test again."
             )
 
         # -------- DOMAIN SUMMARY --------
