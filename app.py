@@ -18,9 +18,6 @@ run_id = str(int(time.time()))
 
 st.title("AI Visibility Runner")
 
-# Tabs: main runner + history
-tab_run, tab_history = st.tabs(["Run prompt", "Run history"])
-
 # ---------- API CALL HELPERS ----------
 
 def call_chatgpt(prompt: str) -> str:
@@ -145,6 +142,23 @@ def extract_domains_from_text(text: str) -> list:
         counts[netloc] = counts.get(netloc, 0) + 1
     return [{"domain": d, "hits": c} for d, c in counts.items()]
 
+# ---------- TEMPLATE FILL HELPER ----------
+
+def fill_template(tpl: str, vals: dict) -> str:
+    text = str(tpl)
+    placeholders = re.findall(r"{([^}]+)}", text)
+    for key in placeholders:
+        value = vals.get(key) or ""
+        text = text.replace("{" + key + "}", value)
+
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    text = re.sub(r"\s+(in|for|with)\s+(?=[?.!]|$)", "", text)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    return text
+
+# Tabs: main runner + history
+tab_run, tab_history = st.tabs(["Run prompt", "Run history"])
+
 # ---------- TAB 1: RUN PROMPT ----------
 
 with tab_run:
@@ -160,7 +174,6 @@ with tab_run:
             ["(any)"] + sorted(df["intent_type"].unique().tolist())
         )
 
-        # Client field
         client_name = st.text_input(
             "Client / project name",
             help="Short label for this brand or engagement."
@@ -210,7 +223,6 @@ with tab_run:
             ),
         }
 
-        # Map brand fields used in some templates
         inputs["brand_a"] = inputs["brand"]
         inputs["brand_b"] = inputs["competitor"]
 
@@ -263,24 +275,18 @@ with tab_run:
 
     st.subheader("2) Fill prompt")
 
-def fill_template(tpl: str, vals: dict) -> str:
-    text = str(tpl)
-
-    # Only replace actual placeholders that appear in the template
-    placeholders = re.findall(r"{([^}]+)}", text)
-    for key in placeholders:
-        value = vals.get(key) or ""
-        text = text.replace("{" + key + "}", value)
-
-    # Clean double spaces and stray "in/for/with" at the end
-    text = re.sub(r"\s{2,}", " ", text).strip()
-    text = re.sub(r"\s+(in|for|with)\s+(?=[?.!]|$)", "", text)
-    text = re.sub(r"\s{2,}", " ", text).strip()
-    return text
-
     if not chosen.empty:
         template = chosen.iloc[0]["prompt_template"]
         filled = fill_template(template, inputs)
+
+        # Optional debug: show unfilled vars
+        missing_vars = re.findall(r"{([^}]+)}", filled)
+        if missing_vars:
+            st.warning(
+                "These variables are still in the prompt and have no value: "
+                + ", ".join(sorted(set(missing_vars)))
+            )
+
         st.markdown("**Template**")
         st.code(template, language="text")
         st.markdown("**Filled prompt**")
@@ -302,12 +308,9 @@ def fill_template(tpl: str, vals: dict) -> str:
             "You run searches in AI tools by hand."
         )
 
-    # Updated instruction text
     pasted_sources = st.text_area(
         "Optional: paste source URLs or citations here before you hit Run now.",
-        help=(
-            "The app will extract domains from this text for this run."
-        ),
+        help="The app will extract domains from this text for this run.",
         height=100,
     )
 
@@ -421,7 +424,6 @@ with tab_history:
     else:
         runs_df = pd.read_csv(RUNS_PATH)
 
-        # Derive client from inputs_json so we can filter on it
         def extract_client(val: str) -> str:
             try:
                 data = json.loads(val or "{}")
@@ -475,7 +477,6 @@ with tab_history:
             use_container_width=True,
         )
 
-        # -------- BRAND SUMMARY --------
         st.markdown("### Brand counts by platform")
 
         brand_rows = []
@@ -572,7 +573,6 @@ with tab_history:
                 "Set 'Your brand' and 'Main competitor' in runs, then test again."
             )
 
-        # -------- DOMAIN SUMMARY --------
         st.markdown("### Domain counts by platform")
         domain_rows = []
         for _, row in runs_df.iterrows():
