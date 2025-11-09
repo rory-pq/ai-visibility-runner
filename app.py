@@ -89,6 +89,38 @@ def call_gemini(prompt: str) -> str:
     except Exception as e:
         return f"Gemini API error: {e}"
 
+def call_claude(prompt: str) -> str:
+    api_key = st.secrets.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return "Claude API not configured. Add ANTHROPIC_API_KEY in Streamlit secrets."
+
+    url = "https://api.anthropic.com/v1/messages"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01",
+    }
+    data = {
+        "model": "claude-3-5-sonnet-20240620",
+        "max_tokens": 800,
+        "temperature": 0.2,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=data, timeout=40)
+        resp.raise_for_status()
+        out = resp.json()
+        parts = out.get("content", [])
+        text_chunks = []
+        for p in parts:
+            if p.get("type") == "text":
+                text_chunks.append(p.get("text", ""))
+        text = " ".join(text_chunks).strip()
+        return text or "Claude response was empty."
+    except Exception as e:
+        return f"Claude API error: {e}"
+
 # ---------- BRAND + DOMAIN HELPERS ----------
 
 def detect_brands_in_text(text: str, inputs: dict) -> list:
@@ -228,7 +260,7 @@ with tab_run:
 
         st.markdown("---")
         api_mode = st.checkbox(
-            "Run via APIs (ChatGPT, Perplexity, Gemini)",
+            "Run via APIs (ChatGPT, Perplexity, Gemini, Claude)",
             value=False,
             help="Off: copy prompts by hand. On: call model APIs from this app."
         )
@@ -279,7 +311,6 @@ with tab_run:
         template = chosen.iloc[0]["prompt_template"]
         filled = fill_template(template, inputs)
 
-        # Optional debug: show unfilled vars
         missing_vars = re.findall(r"{([^}]+)}", filled)
         if missing_vars:
             st.warning(
@@ -291,7 +322,6 @@ with tab_run:
         st.code(template, language="text")
 
         st.markdown("**Filled prompt**")
-        # Code block: high contrast + built-in copy button
         st.code(filled, language="text")
     else:
         st.warning("No template selected.")
@@ -301,7 +331,7 @@ with tab_run:
 
     if api_mode:
         st.caption(
-            "API mode is ON. The app calls ChatGPT, Perplexity, and Gemini "
+            "API mode is ON. The app calls ChatGPT, Perplexity, Gemini, and Claude "
             "for each platform you select."
         )
     else:
@@ -365,7 +395,7 @@ with tab_run:
 
     platforms = st.multiselect(
         "Pick platforms to run/log",
-        ["ChatGPT", "Perplexity", "Gemini", "AI Overviews"],
+        ["ChatGPT", "Perplexity", "Gemini", "Claude"],
         default=["ChatGPT"],
     )
 
@@ -379,13 +409,15 @@ with tab_run:
         results = {}
         for p in platforms:
             response_text = ""
-            if api_mode and p != "AI Overviews":
+            if api_mode:
                 if p == "ChatGPT":
                     response_text = call_chatgpt(filled)
                 elif p == "Perplexity":
                     response_text = call_perplexity(filled)
                 elif p == "Gemini":
                     response_text = call_gemini(filled)
+                elif p == "Claude":
+                    response_text = call_claude(filled)
             else:
                 response_text = ""
 
