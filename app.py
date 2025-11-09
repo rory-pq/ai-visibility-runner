@@ -298,10 +298,9 @@ with tab_run:
 
     # Updated instruction text
     pasted_sources = st.text_area(
-        "Optional: paste source URLs or citations here",
+        "Optional: paste source URLs or citations here before you hit Run now.",
         help=(
-            "Optional: paste source URLs or citations here before you hit Run now. "
-            "The app will extract domains for this run."
+            "The app will extract domains from this text for this run."
         ),
         height=100,
     )
