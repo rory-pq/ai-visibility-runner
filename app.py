@@ -92,7 +92,7 @@ def call_gemini(prompt: str) -> str:
     except Exception as e:
         return f"Gemini API error: {e}"
 
-# ---------- BRAND + DOMAIN HELPERS (DYNAMIC ONLY) ----------
+# ---------- BRAND + DOMAIN HELPERS ----------
 
 def detect_brands_in_text(text: str, inputs: dict) -> list:
     """Use only Your brand and Main competitor for brand hits."""
@@ -128,7 +128,7 @@ def detect_brands_in_text(text: str, inputs: dict) -> list:
     return hits
 
 def extract_domains_from_text(text: str) -> list:
-    """Find domains from URLs in the response text."""
+    """Find domains from URLs in plain text."""
     if not text:
         return []
     urls = re.findall(r"https?://[^\s)>\]\"'}]+", text)
@@ -160,7 +160,6 @@ with tab_run:
             ["(any)"] + sorted(df["intent_type"].unique().tolist())
         )
 
-        # Core inputs with clearer labels and help
         inputs = {
             "brand": st.text_input(
                 "Your brand",
@@ -227,7 +226,6 @@ with tab_run:
         opt = set(str(row["variables_optional"]).split("|")) if pd.notna(row["variables_optional"]) else set()
         return sum(1 for k in opt if vals.get(k))
 
-    # Find candidates that have all required variables
     cands = pool[pool.apply(lambda r: has_required(r, inputs), axis=1)].copy()
 
     if cands.empty:
@@ -273,7 +271,7 @@ with tab_run:
         st.markdown("**Template**")
         st.code(template, language="text")
         st.markdown("**Filled prompt**")
-        st.text_area("Prompt", value=filled, height=140)
+        st.text_area("Prompt", value=filled, height=140, disabled=True)
     else:
         st.warning("No template selected.")
         st.stop()
@@ -291,7 +289,15 @@ with tab_run:
             "You run searches in AI tools by hand."
         )
 
-    def log_run(platform, prompt, meta, response_text: str):
+    # New: optional paste box for external sources
+    pasted_sources = st.text_area(
+        "Optional: paste source URLs or citations here",
+        help="Paste URLs or copied source lists from ChatGPT, Perplexity, AI Overviews, etc. "
+             "The app will extract domains for this run.",
+        height=100,
+    )
+
+    def log_run(platform, prompt, meta, response_text: str, extra_sources: str):
         RUNS_PATH.touch(exist_ok=True)
         cols = [
             "timestamp",
@@ -308,12 +314,15 @@ with tab_run:
         ]
 
         brand_hits = detect_brands_in_text(response_text, inputs)
-        domain_hits = extract_domains_from_text(response_text)
+        # combine model output text and pasted sources for domain extraction
+        combined_for_domains = ((response_text or "") + "\n" + (extra_sources or "")).strip()
+        domain_hits = extract_domains_from_text(combined_for_domains)
 
         snippet = (response_text or "").strip().replace("\n", " ")
         if len(snippet) > 300:
             snippet = snippet[:297] + "..."
 
+        # store pasted sources in raw_capture_path for now
         row = {
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "platform": platform,
@@ -325,7 +334,7 @@ with tab_run:
             "top_brands_json": json.dumps(brand_hits),
             "top_domains_json": json.dumps(domain_hits),
             "rank_notes": snippet,
-            "raw_capture_path": "",
+            "raw_capture_path": (extra_sources or ""),
         }
         try:
             if RUNS_PATH.stat().st_size == 0:
@@ -363,7 +372,7 @@ with tab_run:
             else:
                 response_text = ""
 
-            log_run(p, filled, meta, response_text)
+            log_run(p, filled, meta, response_text, pasted_sources)
             results[p] = response_text
 
         st.success("Runs logged. See previews below and in the Run history tab.")
@@ -376,6 +385,7 @@ with tab_run:
                 f"{p} response",
                 value=text,
                 height=200,
+                disabled=True,
             )
 
         try:
@@ -462,7 +472,6 @@ with tab_history:
         if brand_rows:
             brand_df = pd.DataFrame(brand_rows)
 
-            # Focus toggle based on the most recent run's brand + competitor
             latest_inputs = {}
             try:
                 latest_row = runs_df.sort_values("timestamp").iloc[-1]
@@ -564,7 +573,8 @@ with tab_history:
             )
         else:
             st.info(
-                "No domains detected yet. Perplexity and other tools must return URLs first."
+                "No domains detected yet. Perplexity and other tools must return URLs first "
+                "or paste sources into runs."
             )
 
         st.caption("Need full data? Download the CSV below.")
