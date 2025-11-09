@@ -458,6 +458,9 @@ with tab_history:
     else:
         runs_df = pd.read_csv(RUNS_PATH)
 
+        # Keep a stable index for delete actions
+        runs_df = runs_df.reset_index().rename(columns={"index": "row_idx"})
+
         def extract_client(val: str) -> str:
             try:
                 data = json.loads(val or "{}")
@@ -511,6 +514,45 @@ with tab_history:
             use_container_width=True,
         )
 
+        # ----- DELETE SINGLE RUN -----
+        st.markdown("#### Edit log")
+
+        if not filtered.empty:
+            # Build label → row_idx map
+            options = []
+            label_to_idx = {}
+            for _, row in filtered.iterrows():
+                idx = int(row["row_idx"])
+                ts = row.get("timestamp", "")
+                client = row.get("client", "") or "-"
+                platform = row.get("platform", "")
+                tmpl = row.get("template_id", "")
+                label = f"{idx}: {ts} | {client} | {platform} | {tmpl}"
+                options.append(label)
+                label_to_idx[label] = idx
+
+            selected_label = st.selectbox(
+                "Pick a run to delete",
+                ["(none)"] + options,
+            )
+
+            if selected_label != "(none)":
+                if st.button("Delete selected run"):
+                    idx_to_drop = label_to_idx[selected_label]
+                    updated = runs_df[runs_df["row_idx"] != idx_to_drop].drop(
+                        columns=["row_idx"]
+                    )
+                    if updated.empty:
+                        # Clear file if no rows left
+                        RUNS_PATH.unlink(missing_ok=True)
+                    else:
+                        updated.to_csv(RUNS_PATH, index=False)
+                    st.success("Run deleted from log.")
+                    st.rerun()
+        else:
+            st.caption("No runs match the current filters.")
+
+        # -------- BRAND SUMMARY --------
         st.markdown("### Brand counts by platform")
 
         brand_rows = []
@@ -607,6 +649,7 @@ with tab_history:
                 "Set 'Your brand' and 'Main competitor' in runs, then test again."
             )
 
+        # -------- DOMAIN SUMMARY --------
         st.markdown("### Domain counts by platform")
         domain_rows = []
         for _, row in runs_df.iterrows():
@@ -649,3 +692,14 @@ with tab_history:
                 file_name="runs.csv",
                 mime="text/csv",
             )
+
+        # -------- DANGER ZONE: CLEAR ALL RUNS --------
+        st.markdown("### Danger zone")
+        confirm_clear = st.checkbox(
+            "I understand this will delete all runs from the log."
+        )
+        if confirm_clear:
+            if st.button("Clear all runs"):
+                RUNS_PATH.unlink(missing_ok=True)
+                st.success("All runs deleted.")
+                st.rerun()
