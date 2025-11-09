@@ -263,14 +263,20 @@ with tab_run:
 
     st.subheader("2) Fill prompt")
 
-    def fill_template(tpl: str, vals: dict) -> str:
-        text = tpl
-        for k, v in vals.items():
-            text = text.replace("{" + k + "}", v or "")
-        text = re.sub(r"\s{2,}", " ", text).strip()
-        text = re.sub(r"\s+(in|for|with)\s+(?=[?.!]|$)", "", text)
-        text = re.sub(r"\s{2,}", " ", text).strip()
-        return text
+def fill_template(tpl: str, vals: dict) -> str:
+    text = str(tpl)
+
+    # Only replace actual placeholders that appear in the template
+    placeholders = re.findall(r"{([^}]+)}", text)
+    for key in placeholders:
+        value = vals.get(key) or ""
+        text = text.replace("{" + key + "}", value)
+
+    # Clean double spaces and stray "in/for/with" at the end
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    text = re.sub(r"\s+(in|for|with)\s+(?=[?.!]|$)", "", text)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    return text
 
     if not chosen.empty:
         template = chosen.iloc[0]["prompt_template"]
