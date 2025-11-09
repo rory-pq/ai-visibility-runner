@@ -160,7 +160,14 @@ with tab_run:
             ["(any)"] + sorted(df["intent_type"].unique().tolist())
         )
 
+        # Client field
+        client_name = st.text_input(
+            "Client / project name",
+            help="Short label for this brand or engagement."
+        )
+
         inputs = {
+            "client": client_name,
             "brand": st.text_input(
                 "Your brand",
                 help="Client brand or your agency name."
@@ -289,11 +296,13 @@ with tab_run:
             "You run searches in AI tools by hand."
         )
 
-    # New: optional paste box for external sources
+    # Updated instruction text
     pasted_sources = st.text_area(
         "Optional: paste source URLs or citations here",
-        help="Paste URLs or copied source lists from ChatGPT, Perplexity, AI Overviews, etc. "
-             "The app will extract domains for this run.",
+        help=(
+            "Optional: paste source URLs or citations here before you hit Run now. "
+            "The app will extract domains for this run."
+        ),
         height=100,
     )
 
@@ -314,7 +323,6 @@ with tab_run:
         ]
 
         brand_hits = detect_brands_in_text(response_text, inputs)
-        # combine model output text and pasted sources for domain extraction
         combined_for_domains = ((response_text or "") + "\n" + (extra_sources or "")).strip()
         domain_hits = extract_domains_from_text(combined_for_domains)
 
@@ -322,7 +330,6 @@ with tab_run:
         if len(snippet) > 300:
             snippet = snippet[:297] + "..."
 
-        # store pasted sources in raw_capture_path for now
         row = {
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "platform": platform,
@@ -409,20 +416,37 @@ with tab_history:
     else:
         runs_df = pd.read_csv(RUNS_PATH)
 
+        # Derive client from inputs_json so we can filter on it
+        def extract_client(val: str) -> str:
+            try:
+                data = json.loads(val or "{}")
+                return (data.get("client") or "").strip()
+            except Exception:
+                return ""
+
+        runs_df["client"] = runs_df.get("inputs_json", "").apply(extract_client)
+
         platforms_all = ["All"] + sorted(runs_df["platform"].dropna().unique().tolist())
         intents_all = ["All"] + sorted(runs_df["intent_type"].dropna().unique().tolist())
+        clients_all = ["All"] + sorted(
+            [c for c in runs_df["client"].dropna().unique().tolist() if c]
+        )
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             platform_filter = st.selectbox("Filter by platform", platforms_all)
         with col2:
             intent_filter = st.selectbox("Filter by intent", intents_all)
+        with col3:
+            client_filter = st.selectbox("Filter by client", clients_all)
 
         filtered = runs_df.copy()
         if platform_filter != "All":
             filtered = filtered[filtered["platform"] == platform_filter]
         if intent_filter != "All":
             filtered = filtered[filtered["intent_type"] == intent_filter]
+        if client_filter != "All":
+            filtered = filtered[filtered["client"] == client_filter]
 
         if "timestamp" in filtered.columns:
             filtered = filtered.sort_values("timestamp", ascending=False)
@@ -431,6 +455,7 @@ with tab_history:
         display_df = filtered[
             [
                 "timestamp",
+                "client",
                 "platform",
                 "template_id",
                 "intent_type",
