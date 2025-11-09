@@ -273,27 +273,27 @@ with tab_run:
 
     chosen = df[df["template_id"] == chosen_id].head(1)
 
-    st.subheader("2) Fill prompt")
+st.subheader("2) Fill prompt")
 
-    if not chosen.empty:
-        template = chosen.iloc[0]["prompt_template"]
-        filled = fill_template(template, inputs)
+if not chosen.empty:
+    template = chosen.iloc[0]["prompt_template"]
+    filled = fill_template(template, inputs)
 
-        # Optional debug: show unfilled vars
-        missing_vars = re.findall(r"{([^}]+)}", filled)
-        if missing_vars:
-            st.warning(
-                "These variables are still in the prompt and have no value: "
-                + ", ".join(sorted(set(missing_vars)))
-            )
+    # Optional debug: show unfilled vars
+    missing_vars = re.findall(r"{([^}]+)}", filled)
+    if missing_vars:
+        st.warning(
+            "These variables are still in the prompt and have no value: "
+            + ", ".join(sorted(set(missing_vars)))
+        )
 
-        st.markdown("**Template**")
-        st.code(template, language="text")
-        st.markdown("**Filled prompt**")
-        st.text_area("Prompt", value=filled, height=140, disabled=True)
-    else:
-        st.warning("No template selected.")
-        st.stop()
+    st.markdown("**Template**")
+    st.code(template, language="text")
+    st.markdown("**Filled prompt**")
+    st.code(filled, language="text")
+else:
+    st.warning("No template selected.")
+    st.stop()
 
     st.subheader("3) Run and log")
 
